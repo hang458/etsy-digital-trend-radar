@@ -254,7 +254,8 @@ def collect(config: dict, state: dict, collector: Collector) -> tuple[dict, list
 
 def export(items: dict, generated: str, status: dict) -> None:
     rows = sorted(items.values(), key=lambda x: (-x.get("trend_score", 0), x.get("search_rank", 9999)))
-    public = [{k: v for k, v in row.items() if k != "samples"} for row in rows]
+    # Keep the bounded public history so the dashboard can chart observed changes.
+    public = rows
     atomic_json(SITE / "data" / "radar.json", {"generated_at": generated, "items": public})
     atomic_json(SITE / "data" / "status.json", status)
     with (SITE / "data" / "radar.csv").open("w", encoding="utf-8-sig", newline="") as f:
