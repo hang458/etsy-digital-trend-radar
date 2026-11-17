@@ -51,14 +51,13 @@ def atomic_json(path: Path, value) -> None:
     temp.replace(path)
 
 
-def is_digital(row: dict) -> bool:
+def listing_kind(row: dict) -> str:
     kind = str(row.get("type") or row.get("listing_type") or "").strip().lower()
-    if row.get("is_digital") is True:
-        return True
-    if kind:
-        return kind in {"download", "digital", "both"}
-    text = f"{row.get('title', '')} {row.get('description', '')}".lower()
-    return any(word in text for word in ("digital download", "printable", "template", "svg", "png"))
+    digital_flag = row.get("is_digital")
+    if digital_flag is True or str(digital_flag).lower() == "true" or kind in {"download", "digital"}:
+        return "digital"
+    # Etsy's active-listings endpoint returns physical listings as the common case.
+    return "physical"
 
 
 class Collector:
@@ -110,8 +109,8 @@ class Collector:
                 pass
 
 
-def normalize(raw: dict, keyword: str, rank: int) -> dict | None:
-    if not raw.get("listing_id") or not is_digital(raw):
+def normalize(raw: dict, keyword: str, rank: int, category: str) -> dict | None:
+    if not raw.get("listing_id"):
         return None
     price = raw.get("price") or {}
     amount = price.get("amount") if isinstance(price, dict) else price
@@ -135,8 +134,10 @@ def normalize(raw: dict, keyword: str, rank: int) -> dict | None:
         "views": raw.get("views"),
         "shop_name": shop.get("shop_name") or raw.get("shop_name") or "",
         "source_query": keyword,
+        "source_category": category,
+        "categories": [category] if category else [],
+        "listing_type": listing_kind(raw),
         "search_rank": rank,
-        "listing_type": "download",
     }
 
 
@@ -148,6 +149,7 @@ def merge(old: dict, incoming: dict, captured: str, max_samples: int) -> dict:
         if key not in hits:
             hits[key] = {**prev.get(key, {}), **row, "queries": []}
         hits[key]["queries"] = sorted(set(hits[key].get("queries", [])) | {row["source_query"]})
+        hits[key]["categories"] = sorted(set(hits[key].get("categories", [])) | set(row.get("categories", [])))
         hits[key]["search_rank"] = min(hits[key].get("search_rank", row["search_rank"]), row["search_rank"])
     items = {**prev}
     for key, row in hits.items():
@@ -199,20 +201,29 @@ def metrics(row: dict) -> dict:
 
 
 def collect(config: dict, state: dict, collector: Collector) -> tuple[dict, list[str]]:
-    terms = config["keywords"]
+    terms = [
+        {"keyword": keyword, "category": category.get("name", "Other")}
+        for category in config.get("categories", [])
+        for keyword in category.get("keywords", [])
+    ]
+    if not terms:
+        terms = [{"keyword": keyword, "category": "Other"} for keyword in config.get("keywords", [])]
+    if not terms:
+        raise RuntimeError("研究配置中没有可采集的关键词")
     start = int(state.get("next_keyword", 0)) % len(terms)
     count = min(int(config["searches_per_run"]), len(terms), collector.cap)
     selected = [terms[(start + i) % len(terms)] for i in range(count)]
     rows: list[dict] = []
     errors: list[str] = []
     completed = 0
-    for keyword in selected:
+    for task in selected:
+        keyword, category = task["keyword"], task["category"]
         try:
             data = collector.get("/listings/active", keywords=keyword, limit=int(config["results_per_search"]),
                                  offset=0, sort_on="score", sort_order="desc", includes="Images,Shop")
             completed += 1
             for rank, raw in enumerate(data.get("results", []), start=1):
-                row = normalize(raw, keyword, rank)
+                row = normalize(raw, keyword, rank, category)
                 if row:
                     rows.append(row)
         except RuntimeError as exc:
@@ -259,10 +270,10 @@ def export(items: dict, generated: str, status: dict) -> None:
     atomic_json(SITE / "data" / "radar.json", {"generated_at": generated, "items": public})
     atomic_json(SITE / "data" / "status.json", status)
     with (SITE / "data" / "radar.csv").open("w", encoding="utf-8-sig", newline="") as f:
-        fields = ["trend_score", "title", "price", "currency", "favorites", "favorites_24h", "search_rank", "shop_name", "source_query", "url"]
+        fields = ["trend_score", "title", "listing_type", "categories", "price", "currency", "favorites", "favorites_24h", "search_rank", "shop_name", "source_query", "url"]
         writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows({**row, "categories": "; ".join(row.get("categories", []))} for row in rows)
 
 
 def main() -> None:
@@ -303,7 +314,9 @@ def main() -> None:
         "last_success_at": state.get("last_success_at"),
         "collection_status": "ok" if not errors else "partial",
         "candidate_count": len(state.get("items", {})),
-        "keywords_total": len(config.get("keywords", [])),
+        "keywords_total": sum(len(category.get("keywords", [])) for category in config.get("categories", [])) or len(config.get("keywords", [])),
+        "categories_total": len(config.get("categories", [])) or 1,
+        "category_names": [category.get("name", "Other") for category in config.get("categories", [])] or ["Other"],
         "next_keyword": state.get("next_keyword", 0),
         "requests": collector.requests,
         "api_usage": collector.quota,
