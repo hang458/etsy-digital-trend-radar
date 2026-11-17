@@ -220,18 +220,17 @@ def collect(config: dict, state: dict, collector: Collector) -> tuple[dict, list
             if collector.quota.get("retry_at") or collector.quota.get("paused"):
                 break
     # The active-listings search endpoint does not return image associations.
-    # Hydrate the highest-ranked results with Etsy's batch listing endpoint,
-    # which supports includes=Images. Keep within the configured per-run quota.
-    unique_rows = {}
-    for row in rows:
-        unique_rows.setdefault(str(row["listing_id"]), row)
+    # Backfill the highest-ranked saved candidates through Etsy's batch listing
+    # endpoint, which supports includes=Images, while staying within the quota.
+    items = merge(state, rows, utcnow().isoformat(), int(config["history_samples"]))
     image_budget = max(0, collector.cap - collector.requests) * 100
     image_ids = [
-        listing_id for listing_id, _ in sorted(
-            unique_rows.items(),
-            key=lambda pair: (pair[1].get("search_rank", 9999), -float(pair[1].get("favorites") or 0)),
+        str(item["listing_id"]) for item in sorted(
+            (item for item in items.values() if not item.get("image_url")),
+            key=lambda item: (-item.get("trend_score", 0), item.get("search_rank", 9999)),
         )[:image_budget]
     ]
+    image_count = 0
     for offset in range(0, len(image_ids), 100):
         batch_ids = image_ids[offset:offset + 100]
         try:
@@ -240,15 +239,17 @@ def collect(config: dict, state: dict, collector: Collector) -> tuple[dict, list
                 images = item.get("images") or item.get("Images") or []
                 image = images[0].get("url_570xN") if images and isinstance(images[0], dict) else None
                 if image:
-                    row = unique_rows.get(str(item.get("listing_id")))
+                    row = items.get(str(item.get("listing_id")))
                     if row:
                         row["image_url"] = image
+                        image_count += 1
         except RuntimeError as exc:
             errors.append(f"图片信息补充失败：{exc}")
             if collector.quota.get("retry_at") or collector.quota.get("paused"):
                 break
     state["next_keyword"] = (start + completed) % len(terms)
-    return merge(state, rows, utcnow().isoformat(), int(config["history_samples"])), errors
+    print(f"缩略图补充：尝试 {len(image_ids)} 个，成功 {image_count} 个")
+    return items, errors
 
 
 def export(items: dict, generated: str, status: dict) -> None:
