@@ -219,6 +219,34 @@ def collect(config: dict, state: dict, collector: Collector) -> tuple[dict, list
             errors.append(str(exc))
             if collector.quota.get("retry_at") or collector.quota.get("paused"):
                 break
+    # The active-listings search endpoint does not return image associations.
+    # Hydrate the highest-ranked results with Etsy's batch listing endpoint,
+    # which supports includes=Images. Keep within the configured per-run quota.
+    unique_rows = {}
+    for row in rows:
+        unique_rows.setdefault(str(row["listing_id"]), row)
+    image_budget = max(0, collector.cap - collector.requests) * 100
+    image_ids = [
+        listing_id for listing_id, _ in sorted(
+            unique_rows.items(),
+            key=lambda pair: (pair[1].get("search_rank", 9999), -float(pair[1].get("favorites") or 0)),
+        )[:image_budget]
+    ]
+    for offset in range(0, len(image_ids), 100):
+        batch_ids = image_ids[offset:offset + 100]
+        try:
+            batch = collector.get("/listings/batch", listing_ids=",".join(batch_ids), includes="Images")
+            for item in batch.get("results", []):
+                images = item.get("images") or item.get("Images") or []
+                image = images[0].get("url_570xN") if images and isinstance(images[0], dict) else None
+                if image:
+                    row = unique_rows.get(str(item.get("listing_id")))
+                    if row:
+                        row["image_url"] = image
+        except RuntimeError as exc:
+            errors.append(f"图片信息补充失败：{exc}")
+            if collector.quota.get("retry_at") or collector.quota.get("paused"):
+                break
     state["next_keyword"] = (start + completed) % len(terms)
     return merge(state, rows, utcnow().isoformat(), int(config["history_samples"])), errors
 
