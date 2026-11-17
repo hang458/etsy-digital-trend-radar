@@ -36,8 +36,14 @@ jobs:
           git add state/radar_state.json site/data
           git diff --cached --quiet || git commit -m "Refresh Etsy digital trend snapshot"
           git push
+      - name: Explain why the dashboard is not being published
+        if: github.repository_visibility != 'public'
+        run: echo "GitHub Pages deployment is skipped because this repository is private. Collection and snapshot updates still complete."
       - uses: actions/configure-pages@v5
+        if: github.repository_visibility == 'public'
       - uses: actions/upload-pages-artifact@v3
+        if: github.repository_visibility == 'public'
         with:
           path: site
       - uses: actions/deploy-pages@v4
+        if: github.repository_visibility == 'public'
