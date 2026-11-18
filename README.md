@@ -10,6 +10,7 @@
 - 保存有限历史快照，支持比较最近 24 小时收藏变化。
 - 输出适合 GitHub Pages 发布的静态中文研究看板和 CSV 数据。
 - 看板包含商品研究、关键词样本分析和竞品收藏三个视图；支持品类筛选、价格/趋势排序、关键词比较历史图表。
+- 商品研究页支持 Etsy 全站实时搜索；Etsy 凭证只保存在搜索代理端，不会写入公开网页。
 - 关键词指标仅从已采集商品样本汇总，不代表全站搜索量或实际销量；竞品收藏保存在当前浏览器。
 - API 密钥只从环境变量读取，不写入代码、状态文件或网页。
 
@@ -31,6 +32,16 @@ python -m http.server 8000 --directory site
 ## GitHub Actions 定时运行
 
 把项目推送到自己的 GitHub 仓库后，在仓库设置中添加 Actions secrets `ETSY_KEYSTRING`、`ETSY_SHARED_SECRET`，并启用 GitHub Pages（GitHub Actions 发布源）。工作流每小时运行一次；GitHub 可能延迟定时任务。
+
+## 启用 Etsy 全站实时搜索
+
+GitHub Pages 是静态网站，不能安全保存 Etsy API 凭证。请把 `api/worker.js` 部署为 Cloudflare Worker：
+
+1. 在 `api` 目录运行 `npx wrangler login`，然后添加 Worker secrets `ETSY_KEYSTRING` 和 `ETSY_SHARED_SECRET`（可用 `npx wrangler secret put ETSY_KEYSTRING` / `ETSY_SHARED_SECRET`）。
+2. 在 `api` 目录运行 `npx wrangler deploy`，复制部署得到的 `workers.dev` 地址。
+3. 把该地址填入 `site/data/search-config.json` 的 `endpoint`，提交并推送。完成后看板的“全站搜索”按钮会调用 Etsy 官方 API 搜索，凭证始终留在 Worker 环境变量中。
+
+当前 Worker 允许 `https://hang458.github.io` 和本地 `http://localhost:8000`。如更换 Pages 域名，请同步修改 `api/worker.js` 的允许来源列表。搜索分页读取 Etsy API 返回结果，受 Etsy API 访问额度和应用权限限制。
 
 ## 调整研究范围
 
